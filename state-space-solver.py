@@ -6,117 +6,135 @@ def create_line(x, y, dx, dy, length):
 
 class GridNavigator(Problem):
     def __init__(self, agent_start, target_goal, platforms, max_jump=3, rows=12, cols=12):
-        self.rows = rows # Number of rows in the environment grid
-        self.cols = cols # Number of columns in the environment grid
+        self.rows, self.cols = rows, cols
+        # Highly optimized compact state: (row, col, v)
+        # 'v' is a bit-level encoded integer tracking height, descent, and horizontal inertia
+        self.initial = (agent_start[0], agent_start[1], 0)
+        self.goal = target_goal
         self.platforms = platforms
         self.max_jump = max_jump
+
+    directions = {"D": (1, 0), "L": (0, -1), "R": (0, 1), "U": (-1, 0)}
+
+    def is_valid_move(self, state, action):
+        r, c, v = state
+        dr, dc = self.directions[action]
         
-        # State representation: (row, col, current_height, is_descending, horizontal_momentum)
-        # Guarantees native equality and O(1) hashing efficiency for graph search.
-        self.initial = (agent_start[0], agent_start[1], 0, False, False)
-        self.goal = target_goal
+        # Horizontal inertia constraint
+        if v % 2 == 1 and abs(dc) == 1: 
+            return False
+            
+        nr, nc = r + dr, c + dc
         
-        super().__init__(self.initial, self.goal)
+        # Environment boundaries and collision detection
+        if (nr, nc) in self.platforms or not (0 <= nr < self.rows and 0 <= nc < self.cols): 
+            return False
+            
+        # Valid standing/landing verification
+        if (nr + 1, nc) in self.platforms: 
+            return True
+            
+        # Maximum flight ceiling constraint
+        if v >= 2 * self.max_jump and dr == -1: 
+            return False
+            
+        return True
     
     def actions(self, state):
-        valid_actions = []
-        r, c, h, is_descending, h_moved = state
-        
-        # Check if the agent is standing on a solid platform
-        on_platform = (r + 1, c) in self.platforms
-        
-        # Action: Move Down (D)
-        if r < self.rows - 1 and not on_platform and (r + 1, c) not in self.platforms:
-            valid_actions.append('D')
-            
-        # Action: Move Left (L)
-        if c > 0 and (r, c - 1) not in self.platforms:
-            if on_platform or not h_moved:
-                valid_actions.append('L')
-                
-        # Action: Move Right (R)
-        if c < self.cols - 1 and (r, c + 1) not in self.platforms:
-            if on_platform or not h_moved:
-                valid_actions.append('R')
-                
-        # Action: Move Up (U)
-        if r > 0 and (r - 1, c) not in self.platforms:
-            if not is_descending and h < self.max_jump:
-                valid_actions.append('U')
-        
-        valid_actions.sort()
-        return valid_actions
+        return [a for a in self.directions if self.is_valid_move(state, a)]
     
     def result(self, state, action):
-        r, c, h, is_descending, h_moved = state
+        r, c, v = state
+        dr, dc = self.directions[action]
+        nr, nc = r + dr, c + dc
         
-        new_r, new_c = r, c
-        new_h = h
-        new_desc = is_descending
-        new_h_moved = h_moved
-        
-        # Apply vector physics based on the chosen action
-        if action == 'U':
-            new_r -= 1
-            new_h += 1
-            new_h_moved = False # Vertical movement breaks horizontal inertia
-        elif action == 'D':
-            new_r += 1
-            new_desc = True     # Triggers irreversible descent flag
-            new_h_moved = False 
-        elif action == 'L':
-            new_c -= 1
-            new_h_moved = True  # Registers lateral movement to force trajectory alternation
-        elif action == 'R':
-            new_c += 1
-            new_h_moved = True  
+        # Landing: reset inertia vector
+        if (nr + 1, nc) in self.platforms: 
+            return (nr, nc, 0)
             
-        # Landing sequence: Reset flight constraints if landing on a solid platform
-        if (new_r + 1, new_c) in self.platforms:
-            new_h = 0
-            new_desc = False
-            new_h_moved = False
+        # Lateral movement increments inertia flag
+        if abs(dc) == 1: 
+            return (nr, nc, v + 1)
             
-        return (new_r, new_c, new_h, new_desc, new_h_moved)
+        # Vertical physics handling
+        if dr == -1: 
+            v += 1 if v % 2 == 1 else 2
+        else: 
+            v = 2 * self.max_jump
+            
+        return (nr, nc, v)
     
     def goal_test(self, state):
-        # The target is fixed. The goal is a 2D spatial verification.
-        return (state[0], state[1]) == self.goal
-    
+        return state[:-1] == self.goal
+
+    def advanced_heuristic(self, node):
+        """
+        Advanced heuristic for A* Search.
+        Evaluates Manhattan distance but detects fatal trajectories (infinite cost).
+        """
+        r, c, v = node.state
+        gr, gc = self.goal
+        manhattan_dist = abs(r - gr) + abs(c - gc)
+        
+        # Irreversible descent detection
+        if v >= 2 * self.max_jump:
+            # Check if direct target acquisition is still physically possible
+            dv_target, dh_target = gr - r, abs(gc - c)
+            if dv_target >= 0 and dh_target <= dv_target:
+                if not (v % 2 == 1 and dv_target == 0 and dh_target > 0):
+                    return manhattan_dist
+            
+            # Check if any emergency landing platform is reachable
+            is_safe = False
+            for (pr, pc) in self.platforms:
+                dv_platform, dh_platform = (pr - 1) - r, abs(pc - c)
+                if dv_platform >= 0 and dh_platform <= dv_platform:
+                    if not (v % 2 == 1 and dv_platform == 0 and dh_platform > 0):
+                        is_safe = True
+                        break
+                        
+            # Prune branch: Fatal fall detected
+            if not is_safe:
+                return float('inf')
+                
+        return manhattan_dist
+
     def display(self, state):
-        """Visualizes the grid environment and the agent's current state."""
-        agent_pos = (state[0], state[1]) 
+        agent_pos = state[:-1]
         output = ""
         for i in range(self.rows):
             for j in range(self.cols):
-                if agent_pos == (i, j):
-                    ch = '@' # Agent
-                elif self.goal == (i, j):
-                    ch = '&' # Target
-                elif (i, j) in self.platforms:
-                    ch = '#' # Platform/Obstacle
-                else:
-                    ch = '.' # Empty space
+                if agent_pos == (i, j): ch = '@'
+                elif self.goal == (i, j): ch = "&"
+                elif (i, j) in self.platforms: ch = "#"
+                else: ch = "."
                 output += ch + " "
             output += "\n"
         print(output)
-        
-    def execute(self, state, plan, show=False):
-        """Executes a sequence of actions from the state, returning the final state,
-        the accumulated cost, and a boolean indicating whether the objective was achieved.
-        """
-        cost = 0
-        if show:
-            self.display(state)
-        for a in plan:
-            seg = self.result(state, a)
-            cost = self.path_cost(cost, state, a, seg)
-            state = seg
-            obj = self.goal_test(state)
-            if show:
-                print('Action Executed:', a)
-                self.display(state)
-                print('Total Cost:', cost)
-                print('Goal Reached?', obj)
-                print()
-        return (state, cost, obj)
+
+# ==========================================
+# TEST EXECUTION (Demonstration)
+# ==========================================
+if __name__ == "__main__":
+    from searchPlus import astar_search_plus_count
+    
+    # Complex Environment Setup
+    platforms = create_line(6, 11, 0, 1, 2) | create_line(6, 18, 0, 1, 2) | create_line(4, 18, 0, 1, 2) | \
+                create_line(2, 18, 0, 1, 2) | create_line(8, 18, 0, 1, 4) | create_line(10, 16, 0, 1, 1) | \
+                create_line(11, 19, 0, 1, 1) | create_line(8, 16, 0, 1, 1) | create_line(1, 16, 1, 0, 8) | \
+                create_line(6, 4, 0, 1, 1) | {(3, 13), (1, 10), (11, 11), (10, 6)}
+                
+    env = GridNavigator(agent_start=(5, 11), target_goal=(5, 4), platforms=platforms, max_jump=2, rows=12, cols=22)
+    
+    print("Environment Map:")
+    env.display(env.initial)
+    
+    print("Calculating optimal path using A* Search with Fatal-Fall Heuristic...")
+    result_node, expansions, visited = astar_search_plus_count(env, env.advanced_heuristic)
+    
+    if result_node:
+        print(f"Solution found! Total cost: {result_node.path_cost}")
+        print(f"Action sequence: {result_node.solution()}")
+        print(f"Algorithm Efficiency -> Expansions: {expansions} | Visited: {visited + expansions}")
+    else:
+        print("No solution found.")
